@@ -1,0 +1,37 @@
+{
+  "restaurant_id": "napoli-grosser-burstah",
+  "name": "60 seconds to napoli",
+  "location": "Großer Burstah 1-3, 20457 Hamburg",
+  "language": "de",
+  "timezone": "Europe/Berlin",
+  "_comment_hours": "Часы предварительные (по агрегаторам ~12:00-24:00 ежедневно). Подтвердить у ресторана.",
+  "opening_hours": {
+    "0": [["12:00", "24:00"]],
+    "1": [["12:00", "24:00"]],
+    "2": [["12:00", "24:00"]],
+    "3": [["12:00", "24:00"]],
+    "4": [["12:00", "24:00"]],
+    "5": [["12:00", "24:00"]],
+    "6": [["12:00", "24:00"]]
+  },
+  "_comment_tables": "Состав столов — разумные значения по умолчанию для пиццерии. Заменить фактическими после подтверждения.",
+  "tables": [
+    {"id": "T1", "seats": 2},
+    {"id": "T2", "seats": 2},
+    {"id": "T3", "seats": 2},
+    {"id": "T4", "seats": 4},
+    {"id": "T5", "seats": 4},
+    {"id": "T6", "seats": 4},
+    {"id": "T7", "seats": 4},
+    {"id": "T8", "seats": 6},
+    {"id": "T9", "seats": 6},
+    {"id": "T10", "seats": 8}
+  ],
+  "visit_duration_rules": [
+    {"max_party": 4, "minutes": 120},
+    {"max_party": 999, "minutes": 180}
+  ],
+  "booking_horizon_days": 90,
+  "deposit": {"min_party": 7, "amount_eur": 50, "scope": "per_booking"},
+  "persona": "Дружелюбный, с лёгким юмором, но по делу. Отвечает на немецком."
+}
