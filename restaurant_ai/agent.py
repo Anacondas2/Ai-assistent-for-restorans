@@ -1,14 +1,18 @@
-"""«Мозг» агента: системный промпт + разговорный цикл с Claude.
+"""«Мозг» агента: системный промпт, генерация ответа и управление диалогами.
 
 Ядро (booking/availability) уже протестировано и не зависит от ИИ. Здесь Claude
 лишь понимает гостя и выбирает, какой инструмент вызвать. Библиотека anthropic
-импортируется лениво — без неё ядро и тесты диспетчера работают.
+импортируется лениво — без неё ядро и тесты работают.
+
+Слой канала (Telegram/веб) использует ``ConversationManager``: он хранит
+отдельную историю на каждого гостя и общую базу броней.
 """
 
 from __future__ import annotations
 
 import sqlite3
 from datetime import datetime
+from typing import Callable
 
 from . import tools
 from .config import RestaurantConfig
@@ -67,36 +71,17 @@ DATENSCHUTZ: Weise zu Beginn einmal höflich darauf hin: "{GDPR_NOTICE}"
 """
 
 
-def run_chat(conn: sqlite3.Connection, config: RestaurantConfig, menu_text: str,
-             *, model: str = DEFAULT_MODEL, max_turns: int = 20) -> None:
-    """Простой консольный разговор с агентом (для демонстрации/отладки).
+def generate_reply(client, model: str, system_prompt: str, messages: list,
+                   conn: sqlite3.Connection, config: RestaurantConfig,
+                   max_tokens: int = 1024) -> str:
+    """Один обмен: модель может несколько раз вызвать инструменты, пока не ответит.
 
-    Требует установленный пакет anthropic и переменную окружения
-    ANTHROPIC_API_KEY.
+    ``messages`` мутируется (добавляются ответы модели и результаты инструментов).
+    Возвращает финальный текст для гостя.
     """
-    try:
-        import anthropic
-    except ImportError:
-        raise SystemExit("Установите пакет: pip install anthropic")
-
-    client = anthropic.Anthropic()
-    system_prompt = build_system_prompt(config, menu_text)
-    messages: list[dict] = []
-
-    print(f"[{config.name}] Чат запущен. Напишите сообщение (или 'exit').\n")
-    for _ in range(max_turns):
-        user = input("Гость: ").strip()
-        if user.lower() in {"exit", "quit", "выход"}:
-            break
-        messages.append({"role": "user", "content": user})
-        _run_one_exchange(client, model, system_prompt, messages, conn, config)
-
-
-def _run_one_exchange(client, model, system_prompt, messages, conn, config):
-    """Один обмен: модель может несколько раз вызвать инструменты, пока не ответит."""
     while True:
         resp = client.messages.create(
-            model=model, max_tokens=1024,
+            model=model, max_tokens=max_tokens,
             system=[{"type": "text", "text": system_prompt,
                      "cache_control": {"type": "ephemeral"}}],
             tools=tools.TOOLS, messages=messages)
@@ -104,9 +89,7 @@ def _run_one_exchange(client, model, system_prompt, messages, conn, config):
 
         tool_uses = [b for b in resp.content if b.type == "tool_use"]
         if not tool_uses:
-            text = "".join(b.text for b in resp.content if b.type == "text")
-            print(f"Агент: {text}\n")
-            return
+            return "".join(b.text for b in resp.content if b.type == "text")
 
         tool_results = []
         for tu in tool_uses:
@@ -114,3 +97,58 @@ def _run_one_exchange(client, model, system_prompt, messages, conn, config):
             tool_results.append({"type": "tool_result", "tool_use_id": tu.id,
                                  "content": str(result)})
         messages.append({"role": "user", "content": tool_results})
+
+
+class ConversationManager:
+    """Хранит отдельную историю диалога на каждого гостя (chat_id) и общую базу.
+
+    ``client`` можно передать свой (например, заглушку в тестах). По умолчанию
+    создаётся реальный клиент anthropic при первом обращении.
+    """
+
+    def __init__(self, conn: sqlite3.Connection, config: RestaurantConfig,
+                 menu_text: str, *, client=None, model: str = DEFAULT_MODEL,
+                 history_limit: int = 40):
+        self.conn = conn
+        self.config = config
+        self.system_prompt = build_system_prompt(config, menu_text)
+        self.model = model
+        self.history_limit = history_limit
+        self._client = client
+        self._sessions: dict[str, list] = {}
+
+    @property
+    def client(self):
+        if self._client is None:
+            import anthropic  # ленивый импорт: нужен только для живых ответов
+            self._client = anthropic.Anthropic()
+        return self._client
+
+    def reset(self, chat_id: str) -> None:
+        self._sessions.pop(str(chat_id), None)
+
+    def reply(self, chat_id: str, text: str) -> str:
+        chat_id = str(chat_id)
+        messages = self._sessions.setdefault(chat_id, [])
+        messages.append({"role": "user", "content": text})
+        answer = generate_reply(self.client, self.model, self.system_prompt,
+                                messages, self.conn, self.config)
+        # ограничиваем длину истории, чтобы не раздувать расход токенов
+        if len(messages) > self.history_limit:
+            del messages[: len(messages) - self.history_limit]
+        return answer
+
+
+def run_chat(conn: sqlite3.Connection, config: RestaurantConfig, menu_text: str,
+             *, model: str = DEFAULT_MODEL, max_turns: int = 50) -> None:
+    """Простой консольный разговор с агентом (для демонстрации/отладки).
+
+    Требует пакет anthropic и переменную окружения ANTHROPIC_API_KEY.
+    """
+    manager = ConversationManager(conn, config, menu_text, model=model)
+    print(f"[{config.name}] Чат запущен. Напишите сообщение (или 'exit').\n")
+    for _ in range(max_turns):
+        user = input("Гость: ").strip()
+        if user.lower() in {"exit", "quit", "выход"}:
+            break
+        print(f"Агент: {manager.reply('cli', user)}\n")

@@ -51,10 +51,32 @@ restaurant_ai/
   configs/
     napoli.json      — пример настройки ресторана («60 seconds to napoli»)
     napoli_menu.md   — пример меню с аллергенами (требует подтверждения)
-demo_chat.py         — запуск демо-чата (нужен ключ ANTHROPIC_API_KEY)
+demo_chat.py         — запуск демо-чата в консоли (нужен ANTHROPIC_API_KEY)
+run_telegram.py      — запуск Telegram-бота (нужны 2 ключа, см. ниже)
 tests/
   test_availability.py — автотесты ядра
   test_dispatch.py     — автотесты инструментов агента
+  test_telegram.py     — автотесты канала (диалоги + Telegram), без сети
+```
+
+## Канал Telegram (этап 3)
+
+Агент подключается к Telegram: каждый гость общается в своём чате, у каждого
+своя история разговора, общая база броней. Реализовано на стандартной
+библиотеке Python (без платных зависимостей). Сетевая часть отделена от
+логики и покрыта тестами.
+
+### Как запустить Telegram-бота
+
+1. Создать бота: в Telegram написать **@BotFather** → команда `/newbot` →
+   получить **токен** (бесплатно).
+2. Установить ключи и запустить:
+
+```bash
+pip install -r requirements.txt
+export ANTHROPIC_API_KEY=...      # ключ Claude (оплата по факту обращений)
+export TELEGRAM_BOT_TOKEN=...     # токен от @BotFather
+python3 run_telegram.py
 ```
 
 ## Как попробовать живой чат
