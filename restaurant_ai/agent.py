@@ -1,8 +1,8 @@
 """«Мозг» агента: системный промпт, генерация ответа и управление диалогами.
 
-Ядро (booking/availability) уже протестировано и не зависит от ИИ. Здесь Claude
-лишь понимает гостя и выбирает, какой инструмент вызвать. Библиотека anthropic
-импортируется лениво — без неё ядро и тесты работают.
+Ядро (booking/availability) уже протестировано и не зависит от ИИ. Здесь модель
+OpenAI лишь понимает гостя и выбирает, какой инструмент вызвать. Библиотека
+openai импортируется лениво — без неё ядро и тесты работают.
 
 Слой канала (Telegram/веб) использует ``ConversationManager``: он хранит
 отдельную историю на каждого гостя и общую базу броней.
@@ -10,15 +10,15 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime
-from typing import Callable
 
 from . import tools
 from .config import RestaurantConfig
 
-# Рекомендуемая модель Claude (актуальная и качественная для агента).
-DEFAULT_MODEL = "claude-sonnet-4-6"
+# Модель OpenAI по умолчанию (можно переопределить при создании менеджера).
+DEFAULT_MODEL = "gpt-4o"
 
 GDPR_NOTICE = (
     "Hinweis zum Datenschutz: Dieser Chat wird zur Bearbeitung Ihrer Anfrage "
@@ -77,33 +77,48 @@ def generate_reply(client, model: str, system_prompt: str, messages: list,
     """Один обмен: модель может несколько раз вызвать инструменты, пока не ответит.
 
     ``messages`` мутируется (добавляются ответы модели и результаты инструментов).
-    Возвращает финальный текст для гостя.
+    Возвращает финальный текст для гостя. Формат — OpenAI chat completions.
     """
     while True:
-        resp = client.messages.create(
+        full = [{"role": "system", "content": system_prompt}] + messages
+        resp = client.chat.completions.create(
             model=model, max_tokens=max_tokens,
-            system=[{"type": "text", "text": system_prompt,
-                     "cache_control": {"type": "ephemeral"}}],
-            tools=tools.TOOLS, messages=messages)
-        messages.append({"role": "assistant", "content": resp.content})
+            tools=tools.TOOLS, tool_choice="auto", messages=full)
+        msg = resp.choices[0].message
 
-        tool_uses = [b for b in resp.content if b.type == "tool_use"]
-        if not tool_uses:
-            return "".join(b.text for b in resp.content if b.type == "text")
+        if not msg.tool_calls:
+            text = msg.content or ""
+            messages.append({"role": "assistant", "content": text})
+            return text
 
-        tool_results = []
-        for tu in tool_uses:
-            result = tools.dispatch(conn, config, tu.name, tu.input)
-            tool_results.append({"type": "tool_result", "tool_use_id": tu.id,
-                                 "content": str(result)})
-        messages.append({"role": "user", "content": tool_results})
+        # сохраняем ответ ассистента с вызовами инструментов
+        messages.append({
+            "role": "assistant",
+            "content": msg.content,
+            "tool_calls": [
+                {"id": tc.id, "type": "function",
+                 "function": {"name": tc.function.name,
+                              "arguments": tc.function.arguments}}
+                for tc in msg.tool_calls
+            ],
+        })
+        # выполняем каждый инструмент и возвращаем результат модели
+        for tc in msg.tool_calls:
+            try:
+                args = json.loads(tc.function.arguments or "{}")
+            except json.JSONDecodeError:
+                args = {}
+            result = tools.dispatch(conn, config, tc.function.name, args)
+            messages.append({"role": "tool", "tool_call_id": tc.id,
+                             "content": json.dumps(result, default=str,
+                                                   ensure_ascii=False)})
 
 
 class ConversationManager:
     """Хранит отдельную историю диалога на каждого гостя (chat_id) и общую базу.
 
     ``client`` можно передать свой (например, заглушку в тестах). По умолчанию
-    создаётся реальный клиент anthropic при первом обращении.
+    создаётся реальный клиент openai при первом обращении.
     """
 
     def __init__(self, conn: sqlite3.Connection, config: RestaurantConfig,
@@ -120,8 +135,8 @@ class ConversationManager:
     @property
     def client(self):
         if self._client is None:
-            import anthropic  # ленивый импорт: нужен только для живых ответов
-            self._client = anthropic.Anthropic()
+            import openai  # ленивый импорт: нужен только для живых ответов
+            self._client = openai.OpenAI()
         return self._client
 
     def reset(self, chat_id: str) -> None:
@@ -133,17 +148,28 @@ class ConversationManager:
         messages.append({"role": "user", "content": text})
         answer = generate_reply(self.client, self.model, self.system_prompt,
                                 messages, self.conn, self.config)
-        # ограничиваем длину истории, чтобы не раздувать расход токенов
-        if len(messages) > self.history_limit:
-            del messages[: len(messages) - self.history_limit]
+        self._trim(messages)
         return answer
+
+    def _trim(self, messages: list) -> None:
+        """Ограничить длину истории, не разрывая пару assistant→tool.
+
+        Обрезаем с начала до ближайшей реплики пользователя, чтобы история
+        всегда начиналась корректно (иначе OpenAI отвергнет «висячий» tool).
+        """
+        if len(messages) <= self.history_limit:
+            return
+        cut = len(messages) - self.history_limit
+        while cut < len(messages) and messages[cut]["role"] != "user":
+            cut += 1
+        del messages[:cut]
 
 
 def run_chat(conn: sqlite3.Connection, config: RestaurantConfig, menu_text: str,
              *, model: str = DEFAULT_MODEL, max_turns: int = 50) -> None:
     """Простой консольный разговор с агентом (для демонстрации/отладки).
 
-    Требует пакет anthropic и переменную окружения ANTHROPIC_API_KEY.
+    Требует пакет openai и переменную окружения OPENAI_API_KEY.
     """
     manager = ConversationManager(conn, config, menu_text, model=model)
     print(f"[{config.name}] Чат запущен. Напишите сообщение (или 'exit').\n")

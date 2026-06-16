@@ -1,8 +1,9 @@
-"""Инструменты агента — то, что Claude может «вызвать» во время разговора.
+"""Инструменты агента — то, что модель может «вызвать» во время разговора.
 
-Каждый инструмент описан схемой (для Claude) и привязан к реальной операции
-ядра бронирования через ``dispatch``. Так «мозг» агента остаётся отделён от
-бизнес-логики: ядро уже протестировано, а агент лишь решает, что вызвать.
+Каждый инструмент описан схемой в формате OpenAI (function calling) и привязан
+к реальной операции ядра бронирования через ``dispatch``. Так «мозг» агента
+остаётся отделён от бизнес-логики: ядро уже протестировано, а агент лишь решает,
+что вызвать.
 """
 
 from __future__ import annotations
@@ -13,93 +14,77 @@ from datetime import datetime, timedelta
 from . import availability, booking
 from .config import RestaurantConfig
 
-# Схемы инструментов в формате Anthropic tool-use.
+
+def _fn(name, description, properties, required):
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": description,
+            "parameters": {
+                "type": "object",
+                "properties": properties,
+                "required": required,
+            },
+        },
+    }
+
+
+# Схемы инструментов в формате OpenAI tool/function calling.
 TOOLS = [
-    {
-        "name": "check_availability",
-        "description": "Проверить, есть ли свободный стол на указанные дату-время "
-                       "и число гостей. Если нет — вернёт ближайшие свободные "
-                       "альтернативные времена.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "date_time": {"type": "string",
-                              "description": "Дата и время в формате ISO, напр. 2026-06-20T19:00"},
-                "party_size": {"type": "integer", "description": "Число гостей"},
-            },
-            "required": ["date_time", "party_size"],
+    _fn("check_availability",
+        "Проверить, есть ли свободный стол на указанные дату-время и число "
+        "гостей. Если нет — вернёт ближайшие свободные альтернативные времена.",
+        {
+            "date_time": {"type": "string",
+                          "description": "Дата и время в формате ISO, напр. 2026-06-20T19:00"},
+            "party_size": {"type": "integer", "description": "Число гостей"},
         },
-    },
-    {
-        "name": "create_booking",
-        "description": "Создать бронь столика. Вызывать только после того, как "
-                       "подтверждено наличие места и собраны имя и число гостей.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "guest_name": {"type": "string"},
-                "party_size": {"type": "integer"},
-                "date_time": {"type": "string", "description": "ISO, напр. 2026-06-20T19:00"},
-                "guest_contact": {"type": "string", "description": "Телефон или email (необязательно)"},
-                "notes": {"type": "string", "description": "Пожелания, повод и т.п. (необязательно)"},
-            },
-            "required": ["guest_name", "party_size", "date_time"],
+        ["date_time", "party_size"]),
+    _fn("create_booking",
+        "Создать бронь столика. Вызывать только после того, как подтверждено "
+        "наличие места и собраны имя и число гостей.",
+        {
+            "guest_name": {"type": "string"},
+            "party_size": {"type": "integer"},
+            "date_time": {"type": "string", "description": "ISO, напр. 2026-06-20T19:00"},
+            "guest_contact": {"type": "string", "description": "Телефон или email (необязательно)"},
+            "notes": {"type": "string", "description": "Пожелания, повод и т.п. (необязательно)"},
         },
-    },
-    {
-        "name": "modify_booking",
-        "description": "Перенести бронь на другое время и/или изменить число гостей.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "booking_id": {"type": "integer"},
-                "new_date_time": {"type": "string", "description": "ISO (необязательно)"},
-                "new_party_size": {"type": "integer", "description": "(необязательно)"},
-            },
-            "required": ["booking_id"],
+        ["guest_name", "party_size", "date_time"]),
+    _fn("modify_booking",
+        "Перенести бронь на другое время и/или изменить число гостей.",
+        {
+            "booking_id": {"type": "integer"},
+            "new_date_time": {"type": "string", "description": "ISO (необязательно)"},
+            "new_party_size": {"type": "integer", "description": "(необязательно)"},
         },
-    },
-    {
-        "name": "cancel_booking",
-        "description": "Отменить существующую бронь по её номеру.",
-        "input_schema": {
-            "type": "object",
-            "properties": {"booking_id": {"type": "integer"}},
-            "required": ["booking_id"],
+        ["booking_id"]),
+    _fn("cancel_booking",
+        "Отменить существующую бронь по её номеру.",
+        {"booking_id": {"type": "integer"}},
+        ["booking_id"]),
+    _fn("save_guest_note",
+        "Сохранить важную информацию от гостя (аллергия, повод, особое "
+        "пожелание), чтобы её увидел персонал.",
+        {
+            "content": {"type": "string"},
+            "category": {"type": "string",
+                         "enum": ["allergy", "occasion", "preference", "other"]},
+            "guest_contact": {"type": "string"},
+            "booking_id": {"type": "integer"},
         },
-    },
-    {
-        "name": "save_guest_note",
-        "description": "Сохранить важную информацию от гостя (аллергия, повод, "
-                       "особое пожелание), чтобы её увидел персонал.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "content": {"type": "string"},
-                "category": {"type": "string",
-                             "enum": ["allergy", "occasion", "preference", "other"]},
-                "guest_contact": {"type": "string"},
-                "booking_id": {"type": "integer"},
-            },
-            "required": ["content", "category"],
+        ["content", "category"]),
+    _fn("escalate_to_human",
+        "Передать разговор живому человеку (хостес) по SMS. Вызывать, если "
+        "гость недоволен, вопрос сложный, нужна очень большая компания, ИЛИ "
+        "вопрос про аллергию, в котором нельзя быть уверенным на 100%.",
+        {
+            "reason": {"type": "string"},
+            "summary": {"type": "string", "description": "Краткая суть для хостес"},
+            "guest_contact": {"type": "string"},
         },
-    },
-    {
-        "name": "escalate_to_human",
-        "description": "Передать разговор живому человеку (хостес) по SMS. "
-                       "Вызывать, если гость недоволен, вопрос сложный, нужна "
-                       "очень большая компания, ИЛИ вопрос про аллергию, в "
-                       "котором нельзя быть уверенным на 100%.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "reason": {"type": "string"},
-                "summary": {"type": "string", "description": "Краткая суть для хостес"},
-                "guest_contact": {"type": "string"},
-            },
-            "required": ["reason", "summary"],
-        },
-    },
+        ["reason", "summary"]),
 ]
 
 

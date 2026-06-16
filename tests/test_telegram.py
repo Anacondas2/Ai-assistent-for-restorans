@@ -3,6 +3,7 @@
 Сеть и API не вызываются — всё на заглушках.
 """
 
+import json
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -16,23 +17,49 @@ CONFIG_PATH = Path(__file__).resolve().parents[1] / "restaurant_ai" / "configs" 
 MENU_PATH = Path(__file__).resolve().parents[1] / "restaurant_ai" / "configs" / "napoli_menu.md"
 
 
-# --- заглушка клиента anthropic ---
+# --- заглушка клиента OpenAI (формат chat completions) ---
 
-class FakeBlock:
-    def __init__(self, type, text=None, name=None, input=None, id=None):
-        self.type = type
-        self.text = text
+class FakeFunction:
+    def __init__(self, name, arguments):
         self.name = name
-        self.input = input
+        self.arguments = arguments  # JSON-строка, как у OpenAI
+
+
+class FakeToolCall:
+    def __init__(self, id, name, arguments):
         self.id = id
+        self.type = "function"
+        self.function = FakeFunction(name, arguments)
+
+
+class FakeMessage:
+    def __init__(self, content=None, tool_calls=None):
+        self.content = content
+        self.tool_calls = tool_calls
+
+
+class FakeChoice:
+    def __init__(self, message):
+        self.message = message
 
 
 class FakeResp:
-    def __init__(self, content):
-        self.content = content
+    """Имитация ответа OpenAI: resp.choices[0].message."""
+    def __init__(self, message):
+        self.choices = [FakeChoice(message)]
 
 
-class FakeMessages:
+def text_resp(text):
+    return FakeResp(FakeMessage(content=text))
+
+
+def tool_resp(call_id, name, arguments_json):
+    return FakeResp(FakeMessage(
+        content=None,
+        tool_calls=[FakeToolCall(call_id, name, arguments_json)]))
+
+
+class _Completions:
     def __init__(self, script):
         self.script = list(script)
         self.calls = []
@@ -42,9 +69,14 @@ class FakeMessages:
         return self.script.pop(0)
 
 
+class _Chat:
+    def __init__(self, script):
+        self.completions = _Completions(script)
+
+
 class FakeClient:
     def __init__(self, script):
-        self.messages = FakeMessages(script)
+        self.chat = _Chat(script)
 
 
 def _slot(hour=19, days_ahead=7):
@@ -64,21 +96,19 @@ class ConversationManagerTests(unittest.TestCase):
     def test_reply_with_tool_call(self):
         """Модель вызывает check_availability, затем отвечает текстом."""
         script = [
-            FakeResp([FakeBlock("tool_use", name="check_availability",
-                                input={"date_time": _slot(), "party_size": 2},
-                                id="t1")]),
-            FakeResp([FakeBlock("text", text="Ein Tisch ist frei!")]),
+            tool_resp("t1", "check_availability",
+                      json.dumps({"date_time": _slot(), "party_size": 2})),
+            text_resp("Ein Tisch ist frei!"),
         ]
         mgr = ConversationManager(self.conn, self.config, self.menu,
                                   client=FakeClient(script))
         answer = mgr.reply("chat1", "Tisch für 2 heute Abend?")
         self.assertEqual(answer, "Ein Tisch ist frei!")
-        # история: user, assistant(tool_use), user(tool_result), assistant(text)
+        # история: user, assistant(tool_calls), tool(result), assistant(text)
         self.assertEqual(len(mgr._sessions["chat1"]), 4)
 
     def test_sessions_are_isolated(self):
-        script = [FakeResp([FakeBlock("text", text="A")]),
-                  FakeResp([FakeBlock("text", text="B")])]
+        script = [text_resp("A"), text_resp("B")]
         mgr = ConversationManager(self.conn, self.config, self.menu,
                                   client=FakeClient(script))
         self.assertEqual(mgr.reply("chatA", "hi"), "A")
@@ -88,7 +118,7 @@ class ConversationManagerTests(unittest.TestCase):
         self.assertIn("chatB", mgr._sessions)
 
     def test_reset_clears_session(self):
-        script = [FakeResp([FakeBlock("text", text="ok")])]
+        script = [text_resp("ok")]
         mgr = ConversationManager(self.conn, self.config, self.menu,
                                   client=FakeClient(script))
         mgr.reply("c", "hi")

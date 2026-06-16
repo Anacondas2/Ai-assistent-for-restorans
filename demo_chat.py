@@ -2,7 +2,7 @@
 
 Использование:
     pip install -r requirements.txt
-    export ANTHROPIC_API_KEY=...        # ключ Claude
+    export OPENAI_API_KEY=...        # ключ OpenAI
     python3 demo_chat.py
 
 База броней пишется в restaurant.db (можно удалять для чистого старта).

@@ -2,7 +2,7 @@
 
 Шаги:
     pip install -r requirements.txt
-    export ANTHROPIC_API_KEY=...      # ключ Claude (оплата по факту)
+    export OPENAI_API_KEY=...         # ключ OpenAI (оплата по факту)
     export TELEGRAM_BOT_TOKEN=...     # токен бота от @BotFather
     python3 run_telegram.py
 
@@ -30,8 +30,8 @@ def main():
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     if not token:
         raise SystemExit("Установите переменную окружения TELEGRAM_BOT_TOKEN")
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        raise SystemExit("Установите переменную окружения ANTHROPIC_API_KEY")
+    if not os.environ.get("OPENAI_API_KEY"):
+        raise SystemExit("Установите переменную окружения OPENAI_API_KEY")
 
     config = load_config(BASE / "napoli.json")
     menu_text = (BASE / "napoli_menu.md").read_text(encoding="utf-8")
